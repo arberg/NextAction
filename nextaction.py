@@ -282,13 +282,25 @@ class TodoistData(object):
         logging.info("remove next_action from: %s", item.content)
     return mods
 
-
+def urlopen(req):
+  try: 
+    return urllib2.urlopen(req)
+  except urllib2.HTTPError, e:
+    logging.info('HTTPError = ' + str(e.code))
+  except urllib2.URLError, e:
+    logging.info('URLError = ' + str(e.reason))
+  except httplib.HTTPException, e:
+    logging.info('HTTPException')
+  except Exception:
+    import traceback
+    logging.info('generic exception: ' + traceback.format_exc())
+  return None
 
 def GetResponse():
   values = {'api_token': API_TOKEN}
   data = urllib.urlencode(values)
   req = urllib2.Request('https://api.todoist.com/TodoistSync/v2/get', data)
-  return urllib2.urlopen(req)
+  return urlopen(req)
 
 def DoSync(items_to_sync):
   values = {'api_token': API_TOKEN,
@@ -296,7 +308,7 @@ def DoSync(items_to_sync):
   logging.info("posting %s", values)
   data = urllib.urlencode(values)
   req = urllib2.Request('https://api.todoist.com/TodoistSync/v2/sync', data)
-  return urllib2.urlopen(req)
+  return urlopen(req)
 
 def DoSyncAndGetUpdated(items_to_sync, sync_state):
   values = {'api_token': API_TOKEN,
@@ -306,29 +318,36 @@ def DoSyncAndGetUpdated(items_to_sync, sync_state):
   logging.debug("posting %s", values)
   data = urllib.urlencode(values)
   req = urllib2.Request('https://api.todoist.com/TodoistSync/v2/syncAndGetUpdated', data)
-  return urllib2.urlopen(req)
+  return urlopen(req)
 
 def main():
   logging.basicConfig(level=logging.INFO)
   response = GetResponse()
-  json_data = json.loads(response.read())
-  logging.debug("Got initial data: %s", json_data)
-  a = TodoistData(json_data)
-  while True:
-    mods = a.GetProjectMods()
-    if len(mods) == 0:
-      time.sleep(5)
-    else:
-      logging.info("* Modifications necessary - skipping sleep cycle.")
-    logging.info("** Beginning sync")
-    sync_state = a.GetSyncState()
-    changed_data = DoSyncAndGetUpdated(mods, sync_state).read()
-    logging.debug("Got sync data %s", changed_data)
-    changed_data = json.loads(changed_data)
-    logging.info("* Updating model after receiving sync data")
-    a.UpdateChangedData(changed_data)
-    logging.info("* Finished updating model")
-    logging.info("** Finished sync")
+  if response == None:
+    logging.error("Failed to retrieve todoist data")
+  else:
+    json_data = json.loads(response.read())
+    logging.debug("Got initial data: %s", json_data)
+    a = TodoistData(json_data)
+    while True:
+      mods = a.GetProjectMods()
+      if len(mods) == 0:
+        time.sleep(5)
+      else:
+        logging.info("* Modifications necessary - skipping sleep cycle.")
+      logging.info("** Beginning sync")
+      sync_state = a.GetSyncState()
+      updatedResponse = DoSyncAndGetUpdated(mods, sync_state)
+      if updatedResponse == None:
+        logging.info("* Warn: Updated data not received. No internet?")
+      else:
+        changed_data = updatedResponse.read()
+        logging.debug("Got sync data %s", changed_data)
+        changed_data = json.loads(changed_data)
+        logging.info("* Updating model after receiving sync data")
+        a.UpdateChangedData(changed_data)
+        logging.info("* Finished updating model")
+        logging.info("** Finished sync")
 
 if __name__ == '__main__':
   main()
