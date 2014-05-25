@@ -12,14 +12,22 @@ import urllib2
 
 API_TOKEN = 'YOUR_API_TOKEN_HERE'
 NEXT_ACTION_LABEL = u'next_action'
+WAITING_LABEL = u'waiting'
+FUTURE_LABEL = u'future'
+SEQUENTIAL_POSTFIX = u'--'
+PARALLEL_POSTFIX = u'='
+# Will remove next_action label within projects with skip_postfix. For tasks set @waiting label to skip next_action label on subtasks
+SKIP_POSTFIX = u'*'
 
 class TraversalState(object):
   """Simple class to contain the state of the item tree traversal."""
-  def __init__(self, next_action_label_id):
+  def __init__(self, next_action_label_id, waiting_label_id, future_label_id):
     self.remove_labels = []
     self.add_labels = []
     self.found_next_action = False
     self.next_action_label_id = next_action_label_id
+    self.waiting_label_id = waiting_label_id
+    self.future_label_id = future_label_id
 
   def clone(self):
     """Perform a simple clone of this state object.
@@ -27,7 +35,7 @@ class TraversalState(object):
     For parallel traversals it's necessary to produce copies so that every
     traversal to a lower node has the same found_next_action status.
     """
-    t = TraversalState(self.next_action_label_id)
+    t = TraversalState(self.next_action_label_id, self.waiting_label_id, self.future_label_id)
     t.found_next_action = self.found_next_action
     return t
 
@@ -60,13 +68,20 @@ class Item(object):
       self.due_date_utc = datetime.datetime(2100, 1, 1, tzinfo=dateutil.tz.tzutc())
 
   def GetItemMods(self, state):
+    # recurse
     if self.IsSequential():
       self._SequentialItemMods(state)
     elif self.IsParallel():
       self._ParallelItemMods(state)
-    if not state.found_next_action and not self.checked:
+    #what?
+    if not state.found_next_action and not self.checked and not state.future_label_id in self.labels:
       state.found_next_action = True
-      if not state.next_action_label_id in self.labels:
+      # say we are done, but don't set next action label if waiting: if sequential task then skip setting next non-waiting task to next-action if above is waiting
+      if state.waiting_label_id in self.labels:
+        logging.debug('waiting: item "%s"', self.content)
+        if state.next_action_label_id in self.labels:
+          state.remove_labels.append(self)
+      elif not state.next_action_label_id in self.labels:
         state.add_labels.append(self)
     elif state.next_action_label_id in self.labels:
       state.remove_labels.append(self)
@@ -86,6 +101,7 @@ class Item(object):
   def _SequentialItemMods(self, state):
     """
     Iterate over every child, walking down the tree.
+    Iterate in the sortorder Priority > list order
     If none of our children are the next action, check if we are.
     """
     for item in self.children:
@@ -103,17 +119,21 @@ class Item(object):
       item.GetItemMods(temp_state)
       state.merge(temp_state)
 
+  def IsWaiting(self):
+    return self.waiting_label_id in self.labels
+
+  # Tasks are be default sequential, hence say its sequential if task name does not end in =
   def IsSequential(self):
-    return not self.content.endswith('=')
-    #if self.content.endswith('--') or self.content.endswith('='):
-    #  return self.content.endswith('--')
+    return not self.content.endswith(PARALLEL_POSTFIX)
+    #if self.content.endswith(SEQUENTIAL_POSTFIX) or self.content.endswith('='):
+    #  return self.content.endswith(SEQUENTIAL_POSTFIX)
     #else:
     #  return self.parent.IsSequential()
 
   def IsParallel(self):
-    return self.content.endswith('=')
-    #if self.content.endswith('--') or self.content.endswith('='):
-    #  return self.content.endswith('=')
+    return self.content.endswith(PARALLEL_POSTFIX)
+    #if self.content.endswith(SEQUENTIAL_POSTFIX) or self.content.endswith(PARALLEL_POSTFIX):
+    #  return self.content.endswith(PARALLEL_POSTFIX)
     #else:
     #  return self.parent.IsParallel()
 
@@ -132,10 +152,12 @@ class Project(object):
     self.SortChildren()
 
   def IsSequential(self):
-    return self.name.endswith('--')
+    return self.name.endswith(SEQUENTIAL_POSTFIX)
+
 
   def IsParallel(self):
-    return self.name.endswith('=')
+    return not (self.name.endswith(SKIP_POSTFIX) or self.IsSequential())
+    #return self.name.endswith(PARALLEL_POSTFIX)
 
   SortChildren = Item.__dict__['SortChildren']
 
@@ -189,12 +211,23 @@ class TodoistData(object):
     # Store label data - we need this to set the next_action label.
     self._labels_timestamp = label_data['LabelsTimestamp']
     self._next_action_id = None
+    self._waiting_id = None
     for label in label_data['Labels']:
       if label['name'] == NEXT_ACTION_LABEL:
         self._next_action_id = label['id']
         logging.info('Found next_action label, id: %s', label['id'])
+      if label['name'] == WAITING_LABEL:
+        self._waiting_id = label['id']
+        logging.info('Found waiting label, id: %s', label['id'])
+      if label['name'] == FUTURE_LABEL:
+        self._future_id = label['id']
+        logging.info('Found future label, id: %s', label['id'])
     if self._next_action_id == None:
         logging.warning('Failed to find next_action label, need to create it.')
+    if self._waiting_id == None:
+        logging.warning('Failed to find waiting label, next_action will be set even on waiting tasks.')
+    if self._future_id == None:
+        logging.warning('Failed to find future label, next_action will be set even on future tasks.')
 
   def GetSyncState(self):
     project_timestamps = dict()
@@ -255,7 +288,7 @@ class TodoistData(object):
       logging.info("Adding next_action label")
       return mods
     for project in self._projects.itervalues():
-      state = TraversalState(self._next_action_id)
+      state = TraversalState(self._next_action_id, self._waiting_id, self._future_id)
       project.GetItemMods(state)
       if len(state.add_labels) > 0 or len(state.remove_labels) > 0:
         logging.info("For project %s, the following mods:", project.name)
